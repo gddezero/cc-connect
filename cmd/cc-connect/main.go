@@ -143,6 +143,9 @@ func main() {
 		case "send":
 			runSend(os.Args[2:])
 			return
+		case "attach":
+			runAttach(os.Args[2:])
+			return
 		case "cron":
 			runCron(os.Args[2:])
 			return
