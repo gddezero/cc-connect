@@ -28,10 +28,12 @@ func runAttach(args []string) {
 		socketPath  string
 		dataDir     string
 		showPrompt  bool
+		joinMode    bool
 	)
 	fs.StringVar(&socketPath, "socket", "", "explicit unix socket path (overrides default)")
 	fs.StringVar(&dataDir, "data-dir", "", "cc-connect data dir (default: ~/.cc-connect)")
 	fs.BoolVar(&showPrompt, "prompt", true, "show '> ' input prompt (disable for piped stdin)")
+	fs.BoolVar(&joinMode, "join", false, "join existing session as mirror instead of creating new")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: cc-connect attach <project> [flags]
 
@@ -81,8 +83,12 @@ Flags:
 	encoder := json.NewEncoder(conn)
 	decoder := json.NewDecoder(conn)
 
-	// Handshake — optional but lets the server send a hello banner.
-	if err := encoder.Encode(map[string]string{"type": "attach"}); err != nil {
+	// Handshake: "attach" creates a new session, "join" mirrors an existing one.
+	handshakeType := "attach"
+	if joinMode {
+		handshakeType = "join"
+	}
+	if err := encoder.Encode(map[string]string{"type": handshakeType}); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: handshake: %v\n", err)
 		os.Exit(1)
 	}

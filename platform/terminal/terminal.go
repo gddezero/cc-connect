@@ -176,6 +176,19 @@ func (p *Platform) handleConn(c net.Conn) {
 				ReplyCtx:   rctx,
 			})
 
+		case "join":
+			rctx := replyContext{connID: id}
+			p.handler(p, &core.Message{
+				SessionKey: p.sessionKey(id),
+				Platform:   "terminal",
+				MessageID:  generateConnID(),
+				UserID:     "terminal-user",
+				UserName:   "terminal",
+				ChatName:   fmt.Sprintf("terminal://%s", p.project),
+				Content:    "/join",
+				ReplyCtx:   rctx,
+			})
+
 		case "detach":
 			return
 

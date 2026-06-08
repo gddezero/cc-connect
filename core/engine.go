@@ -313,6 +313,8 @@ type interactiveState struct {
 	agentSession           AgentSession
 	platform               Platform
 	replyCtx               any
+	primarySessionKey      string
+	mirrors                mirrorState
 	currentMessageID       string
 	workspaceDir           string
 	agent                  Agent
@@ -2838,13 +2840,23 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 		state.mu.Unlock()
 	}
 
-	// Update reply context for this turn
-	state.mu.Lock()
-	state.platform = p
-	state.replyCtx = msg.ReplyCtx
-	state.currentMessageID = msg.MessageID
-	state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
-	state.mu.Unlock()
+	// Update reply context for this turn. If the sender is a mirror,
+	// rotate it to primary so it gets full platform-native rendering.
+	if state.mirrors.has(interactiveKey) {
+		state.mu.Lock()
+		state.rotatePrimary(p, msg.ReplyCtx, interactiveKey)
+		state.currentMessageID = msg.MessageID
+		state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
+		state.mu.Unlock()
+	} else {
+		state.mu.Lock()
+		state.platform = p
+		state.replyCtx = msg.ReplyCtx
+		state.primarySessionKey = interactiveKey
+		state.currentMessageID = msg.MessageID
+		state.currentTurnUserMessageTimeMs = msg.UserMessageTimeMs
+		state.mu.Unlock()
+	}
 	stopRecallMonitor := e.startMessageRecallMonitor(interactiveKey)
 	defer stopRecallMonitor()
 
@@ -4159,6 +4171,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 					}
 				}
 			}
+			e.mirrorSend(state, fmt.Sprintf("[%d] %s", toolCount, event.ToolName))
 
 		case EventToolResult:
 			if e.display.ToolMessages {
@@ -4388,6 +4401,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 
 			if isAskQuestion {
 				e.sendAskQuestionPrompt(p, replyCtx, event.Questions, 0)
+				e.mirrorSend(state, fmt.Sprintf("⏸ Waiting for answer: %s", event.ToolName))
 			} else {
 				permLimit := e.display.ToolMaxLen
 				if permLimit > 0 {
@@ -4396,6 +4410,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				toolInput := truncateIf(event.ToolInput, permLimit)
 				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
 				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
+				e.mirrorSend(state, fmt.Sprintf("⏸ Permission: %s", event.ToolName))
 			}
 
 			// Stop idle timer while waiting for user permission response;
@@ -4700,6 +4715,10 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				slog.Warn("slow final reply send", "platform", p.Name(), "elapsed", elapsed, "response_len", len(fullResponse))
 			}
 
+			if !isSilent {
+				e.mirrorSend(state, fullResponse)
+			}
+
 			// TTS: async voice reply if enabled (skipped for silent replies)
 			if !isSilent && e.tts != nil && e.tts.Enabled && e.tts.TTS != nil {
 				state.mu.Lock()
@@ -4760,8 +4779,13 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				queued := state.pendingMessages[0]
 				state.pendingMessages = state.pendingMessages[1:]
 				remainingQueue := len(state.pendingMessages)
-				state.platform = queued.platform
-				state.replyCtx = queued.replyCtx
+				if state.mirrors.has(queued.msgSessionKey) {
+					state.rotatePrimary(queued.platform, queued.replyCtx, queued.msgSessionKey)
+				} else {
+					state.platform = queued.platform
+					state.replyCtx = queued.replyCtx
+					state.primarySessionKey = queued.msgSessionKey
+				}
 				state.currentMessageID = queued.messageID
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
@@ -5086,8 +5110,13 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		}
 		queued := state.pendingMessages[0]
 		state.pendingMessages = state.pendingMessages[1:]
-		state.platform = queued.platform
-		state.replyCtx = queued.replyCtx
+		if state.mirrors.has(queued.msgSessionKey) {
+			state.rotatePrimary(queued.platform, queued.replyCtx, queued.msgSessionKey)
+		} else {
+			state.platform = queued.platform
+			state.replyCtx = queued.replyCtx
+			state.primarySessionKey = queued.msgSessionKey
+		}
 		state.currentMessageID = queued.messageID
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
@@ -5173,6 +5202,9 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
+	{[]string{"join", "attach"}, "join"},
+	{[]string{"detach", "leave"}, "detach"},
+	{[]string{"mirrors", "mirror"}, "mirrors"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -5420,6 +5452,12 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWeb(p, msg, args)
 	case "ps":
 		e.cmdPs(p, msg, args)
+	case "join":
+		e.cmdJoin(p, msg)
+	case "detach":
+		e.cmdDetach(p, msg)
+	case "mirrors":
+		e.cmdMirrors(p, msg)
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
