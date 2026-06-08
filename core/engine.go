@@ -3096,6 +3096,13 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
+		// Mirror participants share the primary's agent session. Their Session
+		// object has no AgentSessionID, which would trigger a false recycle.
+		// Skip the check entirely — the agent belongs to the primary.
+		if state.mirrors.has(sessionKey) {
+			return state
+		}
+
 		// Verify the running agent session matches the current active session.
 		// After /new or /switch the active session changes, but the old agent
 		// process may still be alive. Reusing it would send messages to the
